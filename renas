@@ -87,9 +87,13 @@ firmware_repo="https://github.com/ophub/firmware"
 # Set the kernel download repository from github.com
 kernel_repo="https://github.com/ophub/fnnas"
 # Set the list of kernels used by default(Selectable version)
-stable_kernel=("6.12.y")
+rockchip_kernel=("6.12.y")
+amlogic_kernel=("6.12.y" "6.18.y")
+allwinner_kernel=("6.12.y")
 # Set to automatically use the latest kernel
 auto_kernel="true"
+# Initialize the kernel array
+declare -A tags_list
 
 # Set the Amlogic's u-boot series(u-boot-xxx.bin)
 uboot_meson_gxl=("p201.bin" "p212.bin" "s905x-s912.bin" "n1.bin" "r3300l.bin")
@@ -197,7 +201,8 @@ init_var() {
             if [[ -n "${2}" ]]; then
                 oldIFS="${IFS}"
                 IFS="_"
-                stable_kernel=(${2})
+                amlogic_kernel=(${2})
+                specific_kernel=(${2})
                 IFS="${oldIFS}"
                 shift 2
             else
@@ -300,14 +305,57 @@ check_data() {
         board_list=":($(echo ${make_fnnas[@]} | sed -e 's/ /\|/g')):(yes|no)"
     }
 
-    # Get the kernel array(amlogic/rockchip/allwinner) from the model configuration file
+    # Get the kernel array from the model configuration file
     kernel_from=($(
         cat ${model_conf} |
             sed -e 's/NA//g' -e 's/NULL//g' -e 's/[ ][ ]*//g' |
-            grep -E "^[^#].*${board_list}$" | awk -F':' '{print $10}' |
+            grep -E "^[^#].*${board_list}$" | awk -F':' '{print $9}' |
             sort -u | xargs
     ))
-    [[ "${#kernel_from[@]}" -eq 0 ]] && error_msg "Missing [ PLATFORM ] settings, stop building."
+    [[ "${#kernel_from[@]}" -eq 0 ]] && error_msg "Missing [ KERNEL_TAGS ] settings, stop building."
+
+    # Convert the kernel_from to the kernel array
+    for item in "${kernel_from[@]}"; do
+        # Split the key and value
+        IFS='/' read -r key value <<<"${item}"
+
+        # Check if the value is "all".
+        if [[ "${value}" == "all" ]]; then
+            # If the value is "all", assign the value of ${key}_kernel. such as [ amlogic_kernel, rockchip_kernel, etc. ]
+            eval "value=\"\${${key}_kernel[@]}\""
+        elif [[ "${value}" =~ ^[1-9]+ ]]; then
+            IFS='_' read -ra value <<<"${value}"
+            value="${value[@]}"
+        fi
+
+        # If auto_kernel is false, use the value from -k parameter
+        if [[ ! "${auto_kernel}" =~ ^(true|yes)$ ]]; then
+            if [[ "${#specific_kernel[@]}" -eq 0 ]]; then
+                error_msg "Plase use the -k parameter to specify the kernel version."
+            else
+                value="${specific_kernel[@]}"
+            fi
+        fi
+
+        # Merge the same key values
+        if [[ -n "${tags_list[${key}]}" ]]; then
+            tags_list[${key}]+=" ${value}"
+        else
+            tags_list[${key}]="${value}"
+        fi
+    done
+
+    # Convert the tags_list array to the kernel array (remove duplicates)
+    for key in "${!tags_list[@]}"; do
+        # Convert the space-separated string to an array and remove duplicates
+        read -ra unique_values <<<"$(echo "${tags_list[${key}]}" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+        # Assign the unique values back to the tags_list
+        tags_list[${key}]="${unique_values[@]}"
+    done
+
+    # Check the kernel tags list
+    [[ "${#tags_list[@]}" -eq 0 ]] && error_msg "The [ tags_list ] is missing, stop building."
+    echo -e "${INFO} The kernel tags list: [ ${!tags_list[@]} ]"
 
     # Convert kernel repository address to api format
     [[ "${kernel_repo}" =~ ^https: ]] && kernel_repo="$(echo ${kernel_repo} | awk -F'/' '{print $4"/"$5}')"
@@ -395,72 +443,88 @@ query_kernel() {
     echo -e "${STEPS} Start querying the latest kernel version..."
 
     # Check the version on the kernel repository
-    tmp_arr_kernels=()
-    i=1
-    for kernel_var in "${stable_kernel[@]}"; do
-        echo -e "${INFO} (${i}) Auto query the latest kernel version for [ ${kernel_var} ]"
+    x="1"
+    for key in "${!tags_list[@]}"; do
+        {
+            # Query the name of the latest kernel version
+            tmp_arr_kernels=()
+            down_kernel_list=(${tags_list[${key}]})
+            i=1
+            for kernel_var in "${down_kernel_list[@]}"; do
+                echo -e "${INFO} (${x}.${i}) Auto query the latest kernel version for [ ${key} - ${kernel_var} ]"
 
-        # Identify the kernel <VERSION> and <PATCHLEVEL>, such as [ 6.1 ]
-        kernel_verpatch="$(echo ${kernel_var} | awk -F '.' '{print $1"."$2}')"
+                # Identify the kernel <VERSION> and <PATCHLEVEL>, such as [ 6.1 ]
+                kernel_verpatch="$(echo ${kernel_var} | awk -F '.' '{print $1"."$2}')"
 
-        # Query the latest kernel version
-        latest_version="$(
-            curl -fsSL \
-                ${kernel_api}/releases/expanded_assets/kernel_fnnas |
-                grep -oE "${kernel_verpatch}\.[0-9]+(-[a-zA-Z0-9]+)?\.tar\.gz" |
-                sed -E 's/(-[a-zA-Z0-9]+)?\.tar\.gz//' |
-                sort -urV | head -n 1
-        )"
+                # Query the latest kernel version
+                latest_version="$(
+                    curl -fsSL \
+                        ${kernel_api}/releases/expanded_assets/kernel_${key} |
+                        grep -oE "${kernel_verpatch}\.[0-9]+(-[a-zA-Z0-9]+)?\.tar\.gz" |
+                        sed -E 's/(-[a-zA-Z0-9]+)?\.tar\.gz//' |
+                        sort -urV | head -n 1
+                )"
 
-        if [[ "${?}" -eq 0 && -n "${latest_version}" ]]; then
-            tmp_arr_kernels[${i}]="${latest_version}"
-        else
-            tmp_arr_kernels[${i}]="${kernel_var}"
-        fi
+                if [[ "${?}" -eq 0 && -n "${latest_version}" ]]; then
+                    tmp_arr_kernels[${i}]="${latest_version}"
+                else
+                    tmp_arr_kernels[${i}]="${kernel_var}"
+                fi
 
-        echo -e "${INFO} (${i}) [ ${tmp_arr_kernels[$i]} ] is latest kernel. \n"
+                echo -e "${INFO} (${x}.${i}) [ ${key} - ${tmp_arr_kernels[$i]} ] is latest kernel. \n"
 
-        ((i++))
+                ((i++))
+            done
+
+            # Assign the latest kernel version to the array
+            tags_list[${key}]="${tmp_arr_kernels[@]}"
+
+            ((x++))
+        }
     done
-
-    # Set the latest kernel array
-    stable_kernel=("${tmp_arr_kernels[@]}")
 }
 
 download_kernel() {
     cd ${current_path}
     echo -e "${STEPS} Start downloading the kernel files..."
 
-    # Download the kernel to the storage directory
-    i="1"
-    for kernel_var in "${stable_kernel[@]}"; do
-        for key in "${kernel_from[@]}"; do
-            kernel_down_from="https://github.com/${kernel_repo}/releases/download/kernel_fnnas/${kernel_var}-${key}.tar.gz"
+    x="1"
+    for key in "${!tags_list[@]}"; do
+        {
+            down_kernel_list=(${tags_list[${key}]})
+            # Download the kernel to the storage directory
+            i="1"
+            for kernel_var in "${down_kernel_list[@]}"; do
+                if [[ ! -d "${kernel_path}/${kernel_var}/${kernel_var}-${key}" ]]; then
+                    kernel_down_from="https://github.com/${kernel_repo}/releases/download/kernel_${key}/${kernel_var}-${key}.tar.gz"
+                    echo -e "${INFO} (${x}.${i}) [ ${key} - ${kernel_var} ] Kernel download from [ ${kernel_down_from} ]"
 
-            # Download the kernel files. If the download fails, try again 10 times.
-            if [[ ! -d "${kernel_path}/${kernel_var}/${kernel_var}-${key}" ]]; then
-                echo -e "${INFO} (${i}) [ ${kernel_var} - ${key} ] Kernel download from [ ${kernel_down_from} ]"
-                mkdir -p "${kernel_path}/${kernel_var}"
-                for t in {1..10}; do
-                    curl -fsSL "${kernel_down_from}" -o "${kernel_path}/${kernel_var}/${kernel_var}-${key}.tar.gz"
-                    [[ "${?}" -eq 0 ]] && break || sleep 60
-                done
-                [[ "${?}" -eq 0 ]] || error_msg "Failed to download the kernel files from the server."
+                    # Download the kernel files. If the download fails, try again 10 times.
+                    [[ -d "${kernel_path}/${key}" ]] || mkdir -p ${kernel_path}/${key}
+                    [[ -d "${kernel_path}/${kernel_var}" ]] || mkdir -p ${kernel_path}/${kernel_var}
+                    for t in {1..10}; do
+                        curl -fsSL "${kernel_down_from}" -o "${kernel_path}/${key}/${kernel_var}-${key}.tar.gz"
+                        [[ "${?}" -eq 0 ]] && break || sleep 60
+                    done
+                    [[ "${?}" -eq 0 ]] || error_msg "Failed to download the kernel files from the server."
 
-                # Decompress the kernel files
-                tar -mxzf "${kernel_path}/${kernel_var}/${kernel_var}-${key}.tar.gz" -C "${kernel_path}/${kernel_var}"
-                [[ "${?}" -eq 0 ]] || error_msg "[ ${kernel_var} ] kernel decompression failed."
-            else
-                echo -e "${INFO} (${i}) [ ${kernel_var} - ${key} ] Kernel file already exists, skip download."
-            fi
-        done
+                    # Decompress the kernel files
+                    tar -mxzf "${kernel_path}/${key}/${kernel_var}-${key}.tar.gz" -C "${kernel_path}/${kernel_var}"
+                    [[ "${?}" -eq 0 ]] || error_msg "[ ${kernel_var} ] kernel decompression failed."
+                else
+                    echo -e "${INFO} (${x}.${i}) [ ${key} - ${kernel_var} ] Kernel is in the local directory."
+                fi
 
-        ((i++))
+                ((i++))
+            done
+
+            # Delete downloaded kernel temporary directory
+            rm -rf ${kernel_path}/${key}
+            sync
+
+            ((x++))
+        }
     done
-
-    # Delete downloaded kernel temporary files
-    rm -f ${kernel_path}/${kernel_var}/*.tar.gz
-    sync
 }
 
 confirm_version() {
@@ -508,6 +572,37 @@ confirm_version() {
     # Set the Amlogic u-boot series
     family_rename="${FAMILY//-/_}"
     eval "amlogic_uboot=(\${uboot_${family_rename}[@]})"
+
+    # Get the kernel tags and version
+    conf_kernel_tags="${KERNEL_TAGS%%/*}"
+    conf_kernel_list="${KERNEL_TAGS##*/}"
+    # Check the kernel tags and version
+    [[ -z "${conf_kernel_tags}" ]] && error_msg "The [ ${KERNEL_TAGS} ] is missing tags part."
+    [[ -z "${conf_kernel_list}" ]] && error_msg "The [ ${KERNEL_TAGS} ] is missing list part."
+
+    # Find the kernel list defined in the model database
+    model_kernel=()
+    if [[ "${conf_kernel_list}" == "all" ]]; then
+        eval "model_kernel=(\"\${${conf_kernel_tags}_kernel[@]}\")"
+        model_kernel=($(echo "${model_kernel[@]}" | xargs -n1 | sed -E 's/^([0-9]+\.[0-9]+)(\.[a-z0-9]+)?$/\1.[0-9]+/'))
+    else
+        # Convert the string into an array, using "_" as the delimiter
+        IFS='_' read -ra conf_kernel_list <<<"${conf_kernel_list}"
+        model_kernel=($(echo "${conf_kernel_list[@]}" | xargs -n1 | sed -E 's/^([0-9]+\.[0-9]+)(\.[a-z0-9]+)?$/\1.[0-9]+/'))
+    fi
+    # Check the kernel list
+    [[ "${#model_kernel[@]}" -eq 0 ]] && error_msg "The kernel list is empty for [ ${board} ]"
+
+    # Find the kernel version that matches the custom version
+    build_kernel=()
+    latest_kernel=(${tags_list[${conf_kernel_tags}]})
+    for ck in "${model_kernel[@]}"; do
+        for lk in "${latest_kernel[@]}"; do
+            [[ "${lk}" =~ ^${ck}$ ]] && build_kernel+=("${lk}")
+        done
+    done
+    # Check the kernel version
+    [[ "${#build_kernel[@]}" -eq 0 ]] && error_msg "The kernel list is invalid for [ ${board} ]"
 }
 
 extract_fnnas() {
@@ -996,7 +1091,7 @@ loop_make() {
             confirm_version
 
             i="1"
-            for k in "${stable_kernel[@]}"; do
+            for k in "${build_kernel[@]}"; do
                 {
                     # Set the kernel version
                     kernel="${k}"

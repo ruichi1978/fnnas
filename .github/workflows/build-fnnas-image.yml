@@ -12,9 +12,10 @@ on:
       fnnas_base_version:
         description: "Select fnnas base image version"
         required: false
-        default: "amlogic_338"
+        default: "amlogic_389"
         type: choice
         options:
+          - amlogic_389
           - amlogic_338
           - amlogic_322
           - amlogic_300
@@ -58,6 +59,7 @@ on:
           - fine3399
           - firefly-rk3399
           - fmx1-pro
+          - fmx1-pro-b
           - gzpeite-p01
           - h28k
           - h66k
@@ -83,6 +85,7 @@ on:
           - nanopi-r5s
           - nsy-g16-plus
           - nsy-g68-plus
+          - orangepi-3b
           - orangepi-5-plus
           - orangepi-5b
           - orangepi-zero3
@@ -218,6 +221,8 @@ on:
         type: choice
         options:
           - 6.12.y
+          - 6.18.y
+          - 6.12.y_6.18.y
       auto_kernel:
         description: "Auto use the latest kernel"
         required: false
